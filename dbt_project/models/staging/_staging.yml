@@ -1,0 +1,52 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: Cleaned customer snapshots, one row per customer per batch
+    data_tests:
+      - unique:
+          arguments:
+            column_name: "customer_id || '-' || _batch_id"
+    columns:
+      - name: customer_id
+        data_tests: [not_null]
+      - name: risk_rating
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['LOW', 'MEDIUM', 'HIGH']
+
+  - name: stg_accounts
+    description: Typed account snapshots, one row per account per batch
+    data_tests:
+      - unique:
+          arguments:
+            column_name: "account_id || '-' || _batch_id"
+    columns:
+      - name: account_id
+        data_tests: [not_null]
+      - name: account_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['CHECKING', 'SAVINGS']
+
+  - name: stg_transactions
+    description: Typed and deduplicated transactions
+    columns:
+      - name: transaction_id
+        data_tests: [not_null]
+      - name: amount
+        data_tests: [not_null]
+      - name: direction
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['CR', 'DR']
+
+  - name: stg_balances
+    description: Official month-end balances from the core banking system
+    data_tests:
+      - unique:
+          arguments:
+            column_name: "account_id || '-' || _batch_id"

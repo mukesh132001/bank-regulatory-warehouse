@@ -1,0 +1,21 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Monthly extracts from the core banking system, loaded as-is by loader/load_raw.py
+    schema: raw
+    tables:
+      - name: customers
+        description: Full customer snapshot, one copy per monthly batch
+      - name: accounts
+        description: Full account snapshot, one copy per monthly batch
+      - name: transactions
+        description: Incremental transactions per batch; may contain duplicates and late arrivals
+      - name: balances
+        description: Official month-end balances from the core banking system
+
+  - name: audit
+    schema: audit
+    tables:
+      - name: control_totals
+      - name: load_log

@@ -1,0 +1,12 @@
+bank_dw:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: localhost
+      port: 5432
+      user: bank_admin
+      password: "{{ env_var('DBT_PASSWORD', 'bank_password') }}"
+      dbname: bank_dw
+      schema: public
+      threads: 4

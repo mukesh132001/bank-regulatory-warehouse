@@ -1,0 +1,23 @@
+name: bank_dw
+version: "1.0.0"
+config-version: 2
+profile: bank_dw
+
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  bank_dw:
+    staging:
+      +schema: staging
+      +materialized: view
+    warehouse:
+      +schema: warehouse
+      +materialized: table
+    marts:
+      +schema: marts
+      +materialized: table
