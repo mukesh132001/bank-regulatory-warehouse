@@ -1,0 +1,39 @@
+version: 2
+
+models:
+  - name: dim_customer
+    description: SCD Type 1 - current customer details, one row per customer
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+
+  - name: dim_customer_scd2
+    description: SCD Type 2 - full history of address and risk rating
+    columns:
+      - name: customer_sk
+        data_tests: [unique, not_null]
+
+  - name: dim_customer_risk_scd3
+    description: SCD Type 3 - current and previous risk rating
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+
+  - name: dim_account
+    description: Current account details, one row per account
+    columns:
+      - name: account_id
+        data_tests: [unique, not_null]
+      - name: customer_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_id
+
+  - name: fct_transactions
+    description: Transactions linked to the customer version valid at transaction time
+    columns:
+      - name: customer_version_sk
+        description: Must never be null - every transaction must match exactly one customer version
+        data_tests: [not_null]
