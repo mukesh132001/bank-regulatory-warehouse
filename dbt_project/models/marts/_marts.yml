@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: mart_dormant_customers
+    description: Customers with no customer-initiated activity in the last 90 days (PII masked)
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+
+  - name: mart_account_summary
+    description: Accounts with current balance, PII masked, for dashboards
+    columns:
+      - name: account_id
+        data_tests: [unique, not_null]
+      - name: current_balance
+        data_tests: [not_null]
+
+  - name: mart_active_customer_kpis
+    description: Monthly active customers under two KPI definitions
+    columns:
+      - name: month
+        data_tests: [unique, not_null]

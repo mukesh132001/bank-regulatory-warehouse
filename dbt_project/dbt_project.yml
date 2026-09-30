@@ -21,3 +21,6 @@ models:
     marts:
       +schema: marts
       +materialized: table
+
+vars:
+  reporting_date: '2026-06-30'
