@@ -1,0 +1,25 @@
+Finalize HashAggregate  (cost=58756.23..58881.12 rows=9991 width=49) (actual time=1317.622..1323.787 rows=10000 loops=1)
+  Group Key: account_id
+  Batches: 1  Memory Usage: 5009kB
+  Buffers: shared hit=2 read=44535 written=15564
+  ->  Gather  (cost=56433.32..58556.41 rows=19982 width=49) (actual time=1278.711..1292.184 rows=30000 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=2 read=44535 written=15564
+        ->  Partial HashAggregate  (cost=55433.32..55558.21 rows=9991 width=49) (actual time=1263.086..1268.784 rows=10000 loops=3)
+              Group Key: account_id
+              Batches: 1  Memory Usage: 4241kB
+              Buffers: shared hit=2 read=44535 written=15564
+              Worker 0:  Batches: 1  Memory Usage: 4241kB
+              Worker 1:  Batches: 1  Memory Usage: 4241kB
+              ->  Parallel Bitmap Heap Scan on txn_indexed  (cost=6683.09..53903.25 rows=204010 width=15) (actual time=35.457..996.548 rows=164354 loops=3)
+                    Recheck Cond: ((txn_date >= '2026-06-01'::date) AND (txn_date < '2026-07-01'::date))
+                    Heap Blocks: exact=15220
+                    Buffers: shared hit=2 read=44535 written=15564
+                    ->  Bitmap Index Scan on ix_indexed_date  (cost=0.00..6560.68 rows=489625 width=0) (actual time=41.842..41.854 rows=493063 loops=1)
+                          Index Cond: ((txn_date >= '2026-06-01'::date) AND (txn_date < '2026-07-01'::date))
+                          Buffers: shared hit=2 read=417 written=117
+Planning:
+  Buffers: shared hit=31 read=6
+Planning Time: 1.610 ms
+Execution Time: 1324.628 ms

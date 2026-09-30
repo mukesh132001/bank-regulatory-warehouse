@@ -1,0 +1,22 @@
+Finalize HashAggregate  (cost=86508.85..86633.40 rows=9964 width=49) (actual time=531.186..534.454 rows=10000 loops=1)
+  Group Key: account_id
+  Batches: 1  Memory Usage: 5009kB
+  Buffers: shared read=44118 written=3
+  ->  Gather  (cost=84192.22..86309.57 rows=19928 width=49) (actual time=501.263..509.803 rows=30000 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared read=44118 written=3
+        ->  Partial HashAggregate  (cost=83192.22..83316.77 rows=9964 width=49) (actual time=464.808..469.024 rows=10000 loops=3)
+              Group Key: account_id
+              Batches: 1  Memory Usage: 4241kB
+              Buffers: shared read=44118 written=3
+              Worker 0:  Batches: 1  Memory Usage: 4241kB
+              Worker 1:  Batches: 1  Memory Usage: 4241kB
+              ->  Parallel Seq Scan on txn_plain  (cost=0.00..81617.86 rows=209915 width=15) (actual time=0.116..347.107 rows=164354 loops=3)
+                    Filter: ((txn_date >= '2026-06-01'::date) AND (txn_date < '2026-07-01'::date))
+                    Rows Removed by Filter: 1835646
+                    Buffers: shared read=44118 written=3
+Planning:
+  Buffers: shared hit=33 read=8
+Planning Time: 2.694 ms
+Execution Time: 535.244 ms
