@@ -32,10 +32,11 @@ models:
                 values: ['CHECKING', 'SAVINGS']
 
   - name: stg_transactions
-    description: Typed and deduplicated transactions
+    description: Typed transactions, deduplicated across ALL batches
     columns:
       - name: transaction_id
-        data_tests: [not_null]
+        description: Must be unique across all batches (added after INCIDENT-001)
+        data_tests: [unique, not_null]
       - name: amount
         data_tests: [not_null]
       - name: direction

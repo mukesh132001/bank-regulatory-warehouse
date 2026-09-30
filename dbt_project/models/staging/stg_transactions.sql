@@ -28,13 +28,19 @@ typed as (
 ),
 
 deduplicated as (
-    -- The source system sometimes delivers the same transaction twice in a file.
-    -- Keep the first copy received.
+    -- The source system can deliver the same transaction more than once:
+    -- twice in the same file, OR re-sent in a later month's file.
+    -- Deduplicate on transaction_id ACROSS ALL BATCHES and keep the first copy
+    -- received (earliest batch, then earliest row), so lineage points to the original.
+    --
+    -- INCIDENT-001: this previously partitioned by (transaction_id, _batch_id),
+    -- which missed cross-batch re-sends and inflated balances.
+    -- See docs/incident_001_balance_breaks.md
     select
         *,
         row_number() over (
-            partition by transaction_id, _batch_id
-            order by _source_row
+            partition by transaction_id
+            order by _batch_id, _source_row
         ) as copy_number
     from typed
 )
