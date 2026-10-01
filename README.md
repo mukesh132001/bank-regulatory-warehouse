@@ -147,7 +147,7 @@ connects with a read-only role that cannot even see the warehouse schema:
 Requires Docker Desktop and Python 3.12.
 
 ```bash
-git clone https://github.com/<your-username>/bank-regulatory-warehouse.git
+git clone https://github.com/mukesh132001/bank-regulatory-warehouse.git
 cd bank-regulatory-warehouse
 
 python3.12 -m venv .venv
