@@ -1,12 +1,14 @@
+# Connection details come from environment variables (see .env.example).
+# No password is stored here: dbt fails fast if POSTGRES_PASSWORD is not set.
 bank_dw:
   target: dev
   outputs:
     dev:
       type: postgres
-      host: localhost
-      port: 5432
-      user: bank_admin
-      password: "{{ env_var('DBT_PASSWORD', 'bank_password') }}"
-      dbname: bank_dw
+      host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | as_number }}"
+      user: "{{ env_var('POSTGRES_USER', 'bank_admin') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'bank_dw') }}"
       schema: public
       threads: 4

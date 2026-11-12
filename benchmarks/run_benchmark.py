@@ -17,14 +17,16 @@ Usage:
 
 import argparse
 import statistics
+import sys
 import time
 from datetime import date
 from pathlib import Path
 
 import psycopg2
 
-DB = dict(host="localhost", port=5432, dbname="bank_dw",
-          user="bank_admin", password="bank_password")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.settings import db_params  # noqa: E402
+
 RESULTS = Path("benchmarks/results")
 
 
@@ -136,7 +138,7 @@ def main():
     args = parser.parse_args()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
-    conn = psycopg2.connect(**DB)
+    conn = psycopg2.connect(**db_params())
     conn.autocommit = True
     cur = conn.cursor()
 

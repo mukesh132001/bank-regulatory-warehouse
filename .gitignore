@@ -9,3 +9,12 @@ __pycache__/
 target/
 dbt_packages/
 logs/
+
+# Airflow (local runs and CI)
+airflow/logs/
+.airflow-ci/
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log

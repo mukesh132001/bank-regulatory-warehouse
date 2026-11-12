@@ -9,23 +9,32 @@ Guarantees:
   - Audited: every row records its batch, source file, line number and load
     time. Every load attempt is logged in audit.load_log.
 
+Sources:
+  - local folders under data/extracts/ (default)
+  - the S3 landing zone written by loader/land_to_s3.py (--source s3). Lineage
+    then records the full s3:// URI of the file each row came from.
+
 Usage:
     python loader/load_raw.py                      # load all batches
     python loader/load_raw.py --batch 2026-02      # load one batch
+    python loader/load_raw.py --source s3          # load from the S3 landing zone
     python loader/load_raw.py --batch 2026-02 --simulate-crash   # test rollback
+
+Connection settings come from environment variables / .env (see .env.example).
 """
 
 import argparse
 import csv
 import json
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 import psycopg2
 
-DB = dict(host="localhost", port=5432, dbname="bank_dw",
-          user="bank_admin", password="bank_password")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.settings import db_params  # noqa: E402
 
 # file name -> (raw table, expected columns in the file)
 FILES = {
@@ -96,8 +105,13 @@ def log(cur, batch_id, status, summary, message, started):
         (batch_id, status, json.dumps(summary), message, started))
 
 
-def load_batch(conn, batch_dir, simulate_crash=False):
+def load_batch(conn, batch_dir, simulate_crash=False, source_for=None):
+    """Load one batch folder. `source_for(file_name)` returns the lineage label
+    stored in _source_file (default: "<batch>/<file>")."""
     batch_id = batch_dir.name
+    if source_for is None:
+        def source_for(file_name):
+            return f"{batch_id}/{file_name}"
     control = json.loads((batch_dir / "control.json").read_text())
     started = time.time()
     summary = {}
@@ -130,7 +144,7 @@ def load_batch(conn, batch_dir, simulate_crash=False):
                     cur.execute(
                         f"""INSERT INTO {table} ({col_list}, _batch_id, _source_file, _source_row)
                             SELECT {col_list}, %s, %s, _source_row FROM {tmp}""",
-                        (batch_id, f"{batch_id}/{file_name}"))
+                        (batch_id, source_for(file_name)))
                     loaded = cur.rowcount
 
                     expected = control["files"][file_name]["row_count"]
@@ -164,38 +178,75 @@ def load_batch(conn, batch_dir, simulate_crash=False):
     return summary
 
 
+def local_batches(data_dir, only_batch=None):
+    """[(batch_dir, source_for)] for extract folders on disk."""
+    batches = sorted(p for p in Path(data_dir).iterdir() if p.is_dir())
+    if only_batch:
+        batches = [b for b in batches if b.name == only_batch]
+        if not batches:
+            sys.exit(f"Batch {only_batch} not found in {data_dir}")
+    return [(b, None) for b in batches]
+
+
+def s3_batches(staging_root, only_batch=None):
+    """Download batches from the S3 landing zone into staging_root.
+    Returns [(batch_dir, source_for)] where lineage records the s3:// URI."""
+    from common.s3_landing import download_batch, list_batches, object_key, s3_client
+    from common.settings import s3_location
+
+    bucket, prefix = s3_location()
+    client = s3_client()
+    available = list_batches(client, bucket, prefix)
+    wanted = [only_batch] if only_batch else available
+    missing = [b for b in wanted if b not in available]
+    if missing or not wanted:
+        sys.exit(f"Batch(es) {missing or 'any'} not found in s3://{bucket}/{prefix}/")
+
+    out = []
+    for batch_id in wanted:
+        batch_dir = download_batch(client, bucket, prefix, batch_id, list(FILES), staging_root)
+
+        def source_for(file_name, _b=batch_id):
+            return f"s3://{bucket}/{object_key(prefix, _b, file_name)}"
+
+        out.append((batch_dir, source_for))
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Load extracts into the raw layer")
-    parser.add_argument("--data", default="data/extracts")
+    parser.add_argument("--source", choices=["local", "s3"], default="local",
+                        help="read extracts from local folders or the S3 landing zone")
+    parser.add_argument("--data", default="data/extracts", help="local extracts folder")
     parser.add_argument("--batch", help="load only this batch, e.g. 2026-02")
     parser.add_argument("--simulate-crash", action="store_true",
                         help="fail after the first file to prove rollback works")
     args = parser.parse_args()
 
-    batches = sorted(p for p in Path(args.data).iterdir() if p.is_dir())
-    if args.batch:
-        batches = [b for b in batches if b.name == args.batch]
-        if not batches:
-            sys.exit(f"Batch {args.batch} not found in {args.data}")
-
-    conn = psycopg2.connect(**DB)
+    conn = psycopg2.connect(**db_params())
     with conn:
         with conn.cursor() as cur:
             cur.execute(ddl())
 
-    for batch_dir in batches:
-        t0 = time.time()
-        try:
-            summary = load_batch(conn, batch_dir, args.simulate_crash)
-        except Exception as e:
-            print(f"  {batch_dir.name}: FAILED and rolled back -> {e}")
-            conn.close()
-            sys.exit(1)
-        counts = ", ".join(f"{k.replace('.csv', '')}={v:,}" for k, v in summary.items())
-        print(f"  {batch_dir.name}: OK in {time.time() - t0:.1f}s ({counts})")
+    with tempfile.TemporaryDirectory(prefix="s3_batches_") as staging_root:
+        if args.source == "s3":
+            batches = s3_batches(Path(staging_root), args.batch)
+        else:
+            batches = local_batches(args.data, args.batch)
+
+        for batch_dir, source_for in batches:
+            t0 = time.time()
+            try:
+                summary = load_batch(conn, batch_dir, args.simulate_crash, source_for)
+            except Exception as e:
+                print(f"  {batch_dir.name}: FAILED and rolled back -> {e}")
+                conn.close()
+                sys.exit(1)
+            counts = ", ".join(f"{k.replace('.csv', '')}={v:,}" for k, v in summary.items())
+            print(f"  {batch_dir.name}: OK in {time.time() - t0:.1f}s ({counts})")
 
     conn.close()
-    print("All batches loaded.")
+    print(f"All batches loaded from {args.source}.")
 
 
 if __name__ == "__main__":
