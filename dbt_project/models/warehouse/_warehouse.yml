@@ -32,8 +32,16 @@ models:
                 field: customer_id
 
   - name: fct_transactions
-    description: Transactions linked to the customer version valid at transaction time
+    description: >
+      Transactions linked to the customer version valid at transaction time.
+      Incremental: merges newly loaded transactions on transaction_id.
     columns:
+      - name: transaction_id
+        description: Merge key of the incremental model - must stay unique after every merge
+        data_tests: [unique, not_null]
+      - name: _loaded_at
+        description: When the raw row was loaded; drives which rows an incremental run processes
+        data_tests: [not_null]
       - name: customer_version_sk
         description: Must never be null - every transaction must match exactly one customer version
         data_tests: [not_null]

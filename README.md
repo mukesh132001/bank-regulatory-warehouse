@@ -1,5 +1,7 @@
 # Bank Regulatory Reporting Warehouse
 
+[![CI](https://github.com/mukesh132001/bank-regulatory-warehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/mukesh132001/bank-regulatory-warehouse/actions/workflows/ci.yml)
+
 An end-to-end data warehouse that simulates how a bank prepares data for
 regulatory reporting: messy source extracts in, reconciled and auditable
 numbers out. Every reported figure can be traced back to the exact line of the
@@ -19,14 +21,18 @@ process on a laptop, including a real reconciliation failure and its fix.
 
 ```mermaid
 flowchart LR
-    A["Python generator<br/>6 monthly extracts<br/>with dirty data"] --> B["Loader<br/>ACID, idempotent,<br/>audited"]
+    A["Python generator<br/>6 monthly extracts<br/>with dirty data"] --> S[("S3 landing zone<br/>raw/&lt;entity&gt;/batch=YYYY-MM/")]
+    S --> B["Loader<br/>ACID, idempotent,<br/>audited"]
     B --> C[("raw<br/>exactly as received")]
     C --> D[("staging<br/>cleaned, typed,<br/>deduplicated")]
-    D --> E[("warehouse<br/>SCD 1/2/3, facts,<br/>daily balances")]
+    D --> E[("warehouse<br/>SCD 1/2/3, incremental facts,<br/>daily balances")]
     E --> F[("marts<br/>report-ready,<br/>PII masked")]
     E --> G[("reconciliation<br/>automated checks")]
     F --> H["Metabase<br/>read-only role"]
     G --> H
+    S -.-> P["PySpark staging<br/>parity check vs dbt"]
+    O{{"Airflow: daily DAG,<br/>retries + alerts"}} -.orchestrates.-> A
+    CI{{"GitHub Actions:<br/>full pipeline on every push"}} -.tests.-> E
 ```
 
 | Layer | Role | Analogy |
@@ -35,7 +41,8 @@ flowchart LR
 | `staging` + `warehouse` | Cleaned, typed, deduplicated, modelled with history | Data warehouse (single source of truth) |
 | `marts` | Small, report-ready tables for specific users, PII masked | Data marts |
 
-**Stack:** Python (Faker, psycopg2) · PostgreSQL 16 · dbt 1.12 · Docker Compose · Metabase
+**Stack:** Python (Faker, psycopg2, boto3) · PostgreSQL 16 · dbt 1.12 · Apache Airflow 3 ·
+PySpark 4 · AWS S3 (local emulator: moto) · GitHub Actions · Docker Compose · Metabase
 
 ## What it demonstrates
 
@@ -53,6 +60,45 @@ flowchart LR
 | Different KPIs from the same data | [KPI definitions](docs/kpi_definitions.md), `mart_active_customer_kpis` |
 | "Monthly load slowed 2h → 8h" | [Performance investigation](docs/performance_investigation.md) |
 | ACID | One transaction per batch in `loader/load_raw.py`, proven with `--simulate-crash` |
+| Orchestration | Airflow DAG `bank_regulatory_pipeline`: daily schedule, retries, failure alerts, single-month re-runs |
+| CI/CD | [GitHub Actions](.github/workflows/ci.yml) runs the full pipeline and every test on each push |
+| Cloud data lake landing | `loader/land_to_s3.py` → `s3://…/raw/<entity>/batch=YYYY-MM/`, loader reads with `--source s3` |
+| Spark | `spark/stage_transactions.py`: explicit schemas, quarantine, cross-batch dedup, Parquet, parity vs dbt |
+| Incremental loading | `fct_transactions` merges only newly loaded rows ([benchmark](benchmarks/run_incremental_benchmark.py)) |
+| Secrets management | `.env` (git-ignored) + GitHub Actions secrets; no password in the code |
+
+## How it runs daily
+
+The Airflow DAG `bank_regulatory_pipeline` ([`airflow/dags/`](airflow/dags/bank_regulatory_pipeline.py))
+runs the whole pipeline every day. In a real bank the first step is the core
+banking system dropping its files; here the generator plays that role.
+
+```mermaid
+flowchart LR
+    g[generate_extracts] --> s[land_in_s3] --> l[load_raw] --> st[dbt_staging] --> t[dbt_test_staging]
+    t --> sp[spark_staging_parity]
+    t --> w[dbt_warehouse] --> m[dbt_marts] --> r[reconciliation_check]
+```
+
+<!-- After your first Airflow run, save a screenshot of the Graph view as
+     docs/images/airflow_dag.png and replace this comment with:
+     ![Airflow DAG](docs/images/airflow_dag.png) -->
+
+- **Retries:** every task retries twice, 5 minutes apart.
+- **Failure alerts:** after the last retry, a callback logs the failure and posts it to
+  `ALERT_WEBHOOK_URL` (any Slack-compatible webhook) when one is configured.
+- **Quality gates:** staging tests run before anything is built on top of staging, and
+  the run only turns green if the reconciliation checks pass.
+- **Re-run one month safely:** trigger the DAG with config `{"batch": "2026-03"}`. Only that
+  month is re-landed in S3 and re-loaded (the loader replaces a batch in one transaction),
+  then dbt rebuilds everything downstream and reconciliation must pass again.
+- **One run at a time** (`max_active_runs=1`), no backfill of past dates (`catchup=False`).
+
+**CI:** [GitHub Actions](.github/workflows/ci.yml) runs the same steps on every push and pull
+request against a fresh Postgres and a local S3 emulator: land in S3, load from S3, reload a
+month (idempotency), simulate a crash (rollback), `dbt build` with every test, an incremental
+rebuild, the Spark parity check, the incremental benchmark and the read-only role check. A
+second job imports the DAG with Airflow 3.3.2 and checks its structure, retries and alerting.
 
 ## Highlights
 
@@ -112,6 +158,25 @@ a realistic cause of a load creeping from 2 to 8 hours. Partitioning matched the
 indexed lookup speed with a 3.5x faster reload than the indexed table.
 **Full analysis: [Performance investigation](docs/performance_investigation.md).**
 
+### Spark and dbt must agree
+
+`spark/stage_transactions.py` rebuilds the transactions staging step in PySpark: an explicit
+schema (no inference), `try_` casts with a quarantine table for rows that fail validation,
+the same cross-batch deduplication as the INCIDENT-001 fix (`row_number()` over
+`transaction_id`, first copy received wins) and Parquet output partitioned by month. With
+`--check-against-postgres` it compares row counts, distinct ids, totals and per-batch counts
+with dbt's `stg_transactions` and fails if anything differs. Airflow and CI both run it.
+
+### Incremental loading
+
+`fct_transactions` is an incremental dbt model: after the first build, a run only processes
+transactions whose raw row was loaded since the last run and merges them on
+`transaction_id`. Reloading a month refreshes exactly that month. If the table ever drifts
+from raw, the reconciliation transaction count fails the pipeline until a `--full-refresh`.
+`benchmarks/run_incremental_benchmark.py` times incremental vs full rebuild for a new month
+and checks both give an identical table (results: `benchmarks/results/incremental.md`, also
+shown in each CI run's summary).
+
 ### Security: masking plus access control
 
 Marts expose only masked values (`******6127`, `R*** T***`, `ro***@yahoo.com`),
@@ -144,53 +209,100 @@ connects with a read-only role that cannot even see the warehouse schema:
 
 ## Run it yourself
 
-Requires Docker Desktop and Python 3.12.
+Requires Docker Desktop and Python 3.12 (Java 17+ only if you run the Spark job outside Docker).
+
+### 1. Settings (once)
 
 ```bash
 git clone https://github.com/mukesh132001/bank-regulatory-warehouse.git
 cd bank-regulatory-warehouse
+cp .env.example .env        # then replace every "change-me" value in .env
+```
 
+`.env` is git-ignored. Docker Compose, the Python scripts and `scripts/dbt.py` all read it,
+so no password lives in the code. Compose refuses to start if a required value is missing.
+
+> Upgrading from an older checkout? The old Postgres volume still has the old password.
+> Either put that password in `.env` or reset the volume once with `docker compose down -v`.
+
+### 2a. Run everything with Airflow
+
+```bash
+docker compose up -d --build     # warehouse, S3 emulator, Metabase, Airflow
+```
+
+Open Airflow at `localhost:8080` (user/password from `.env`), un-pause
+`bank_regulatory_pipeline` and trigger it. To re-run a single month, use
+"Trigger DAG w/ config" with `{"batch": "2026-03"}`.
+
+### 2b. Or run the steps yourself
+
+```bash
 python3.12 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate                  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-docker compose up -d                       # Postgres + Metabase
+docker compose up -d postgres s3 metabase
 python data_generator/generate_data.py     # 6 monthly extracts
-python loader/load_raw.py                  # load the raw layer
+python loader/land_to_s3.py --create-bucket    # land them in the S3 landing zone
+python loader/load_raw.py --source s3      # load the raw layer (or omit --source for local files)
 
-cd dbt_project
-dbt build                                  # all models + all tests
-dbt docs generate && dbt docs serve        # lineage graph at localhost:8080
-cd ..
+python scripts/dbt.py build                # all models + all tests (dbt with .env settings)
+python scripts/dbt.py docs generate
+python scripts/dbt.py docs serve --port 8081   # lineage graph at localhost:8081
+
+python spark/stage_transactions.py --check-against-postgres   # PySpark staging + parity
 
 # read-only role for dashboards (after dbt has created the schemas)
-docker exec -i bank_postgres psql -U bank_admin -d bank_dw < sql/security/01_reader_role.sql
+set -a; source .env; set +a
+docker exec -i bank_postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+    -v reader_password="$METABASE_READER_PASSWORD" < sql/security/01_reader_role.sql
 
-python benchmarks/run_benchmark.py         # optional performance experiment
+python benchmarks/run_benchmark.py              # optional: indexing vs partitioning
+python benchmarks/run_incremental_benchmark.py  # optional: incremental vs full rebuild
 ```
 
 Metabase runs at `localhost:3000`. Connect with host `postgres`, database
 `bank_dw`, user `metabase_reader`.
 
+### Using real AWS S3
+
+Remove `AWS_ENDPOINT_URL` from `.env`, set `S3_BUCKET` to your bucket and provide AWS
+credentials the usual way (profile or environment). The same code runs unchanged.
+
+### CI secrets
+
+CI needs no setup: it creates a one-time random password for its throwaway database. To
+use your own, add a repository secret `CI_POSTGRES_PASSWORD`
+(Settings → Secrets and variables → Actions).
+
 ## Repository layout
 
-
 ```
+├── .github/workflows/  CI: full pipeline + DAG integrity on every push
+├── airflow/
+│   ├── dags/           bank_regulatory_pipeline (daily, retries, alerts)
+│   └── Dockerfile      Airflow 3 image with the project's own virtualenv + Java
+├── common/             settings from .env, S3 landing-zone layout
 ├── data_generator/     fake banking extracts with deliberate dirty data
-├── loader/             ACID, idempotent, audited raw loader
+├── loader/             S3 landing upload + ACID, idempotent, audited raw loader
+├── spark/              PySpark staging job with parity check vs dbt
 ├── dbt_project/
-│   ├── models/         staging, warehouse, marts, reconciliation
+│   ├── models/         staging, warehouse (incremental facts), marts, reconciliation
 │   ├── macros/         schema naming, PII masking
 │   └── tests/          SCD integrity, masking, reconciliation
+├── scripts/            dbt wrapper that reads .env
 ├── sql/                schema setup and read-only security role
-├── benchmarks/         indexing vs partitioning experiment and results
+├── benchmarks/         indexing vs partitioning, incremental vs full rebuild
+├── tests/              Airflow DAG integrity tests
 ├── docs/               incident report, KPI definitions, performance write-up
+├── .env.example        every setting, no real secrets
 └── docker-compose.yml
 ```
 
 ## Possible next steps
 
-- Incremental dbt models for transactions instead of full rebuilds
 - Apply monthly partitioning to the real raw and fact tables
-- Orchestration (e.g. Airflow) and CI that runs `dbt build` on every change
-- Secrets management instead of local default passwords
+- Read the landing zone directly from Spark (`s3a://`) and run the job on EMR or Databricks
+- Deploy the DAG to a managed Airflow (Amazon MWAA or Astronomer)
+- Data contracts on the source extracts, so schema changes are caught before loading

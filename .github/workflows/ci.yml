@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    name: Pipeline (S3 -> raw -> dbt build -> Spark parity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: bank_dw
+      POSTGRES_USER: bank_admin
+      S3_BUCKET: bank-dw-landing-ci
+      S3_PREFIX: raw
+      # Local S3 emulator (moto) running as a service container: dummy keys, no real AWS.
+      AWS_ENDPOINT_URL: http://localhost:5000
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+
+    services:
+      s3:
+        image: motoserver/moto:5.2.5
+        ports:
+          - 5000:5000
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Start the warehouse database
+        env:
+          CI_POSTGRES_PASSWORD: ${{ secrets.CI_POSTGRES_PASSWORD }}
+        run: |
+          # Use the CI_POSTGRES_PASSWORD repository secret when it is set; otherwise a
+          # one-time random password for this throwaway database. Never a password in the repo.
+          PGPASS="${CI_POSTGRES_PASSWORD:-$(openssl rand -hex 24)}"
+          echo "::add-mask::$PGPASS"
+          echo "POSTGRES_PASSWORD=$PGPASS" >> "$GITHUB_ENV"
+          echo "PGPASSWORD=$PGPASS" >> "$GITHUB_ENV"
+          docker run -d --name bank_postgres -p 5432:5432 \
+            -e POSTGRES_USER="$POSTGRES_USER" -e POSTGRES_PASSWORD="$PGPASS" -e POSTGRES_DB="$POSTGRES_DB" \
+            postgres:16
+          for i in $(seq 1 30); do
+            docker exec bank_postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" && break
+            sleep 2
+          done
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create raw and audit schemas
+        run: psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f sql/init/01_create_schemas.sql
+
+      - name: Generate the 6 monthly extracts
+        run: python data_generator/generate_data.py
+
+      - name: Land extracts in the S3 landing zone
+        run: python loader/land_to_s3.py --create-bucket
+
+      - name: Load raw layer from S3
+        run: python loader/load_raw.py --source s3
+
+      - name: Re-run one month (must be idempotent)
+        run: python loader/load_raw.py --source s3 --batch 2026-03
+
+      - name: Crash mid-batch (must roll back completely)
+        run: |
+          if python loader/load_raw.py --batch 2026-02 --simulate-crash; then
+            echo "::error::the simulated crash did not fail the load"; exit 1
+          fi
+
+      - name: dbt build (all models + all tests, incl. reconciliation and PII masking)
+        run: python scripts/dbt.py build
+
+      - name: dbt build again (incremental fct_transactions path)
+        run: python scripts/dbt.py build --select fct_transactions+
+
+      - name: PySpark staging + parity check against dbt
+        run: python spark/stage_transactions.py --check-against-postgres
+
+      - name: Incremental vs full rebuild benchmark
+        run: |
+          python benchmarks/run_incremental_benchmark.py --repeats 2
+          cat benchmarks/results/incremental.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Read-only dashboard role (cannot see raw PII)
+        run: |
+          READER_PASS="$(openssl rand -hex 16)"
+          echo "::add-mask::$READER_PASS"
+          psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+            -v reader_password="$READER_PASS" -f sql/security/01_reader_role.sql
+          PGPASSWORD="$READER_PASS" psql -h localhost -U metabase_reader -d "$POSTGRES_DB" \
+            -tAc "select count(*) from marts.mart_account_summary"
+          if PGPASSWORD="$READER_PASS" psql -h localhost -U metabase_reader -d "$POSTGRES_DB" \
+               -tAc "select count(*) from raw.customers"; then
+            echo "::error::metabase_reader can read raw PII"; exit 1
+          fi
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pipeline-results
+          path: |
+            dbt_project/target/run_results.json
+            data/spark/parity_report.json
+            benchmarks/results/incremental.md
+          if-no-files-found: ignore
+
+  airflow-dag:
+    name: Airflow DAG integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AIRFLOW_HOME: ${{ github.workspace }}/.airflow-ci
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Airflow 3.3.2 (official constraints)
+        run: |
+          pip install "apache-airflow==3.3.2" apache-airflow-providers-standard \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt"
+          pip install pytest
+
+      - name: Initialise Airflow metadata (SQLite)
+        run: airflow db migrate
+
+      - name: DAG integrity tests
+        run: pytest tests/test_dag_integrity.py -v
