@@ -20,7 +20,8 @@ DAG_ID = "bank_regulatory_pipeline"
 
 @pytest.fixture(scope="module")
 def dagbag():
-    return DagBag(dag_folder=str(DAG_FOLDER), include_examples=False)
+    # Airflow 3.3 removed include_examples; examples are off via AIRFLOW__CORE__LOAD_EXAMPLES.
+    return DagBag(dag_folder=str(DAG_FOLDER))
 
 
 @pytest.fixture(scope="module")
