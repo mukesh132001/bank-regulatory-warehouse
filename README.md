@@ -235,6 +235,25 @@ Open Airflow at `localhost:8080` (user/password from `.env`), un-pause
 `bank_regulatory_pipeline` and trigger it. To re-run a single month, use
 "Trigger DAG w/ config" with `{"batch": "2026-03"}`.
 
+Airflow runs as separate containers built from one image ([`airflow/Dockerfile`](airflow/Dockerfile)):
+
+| Service | Role |
+|---|---|
+| `airflow-apiserver` | UI and REST API on port 8080 |
+| `airflow-scheduler` | Schedules the DAG and runs tasks (LocalExecutor) |
+| `airflow-dag-processor` | Parses `airflow/dags/` |
+| `airflow-triggerer` | Runs deferred tasks. This DAG has none, but the UI health panel expects one |
+| `airflow-init` | One-off: migrates the metadata database and creates the admin user |
+| `airflow-db` | Airflow's own Postgres, so its tables never mix with the warehouse |
+
+> **Give Docker enough memory.** After `dbt_test_staging`, the Spark parity job and
+> `dbt_warehouse` run in parallel, next to Postgres, Metabase and the Airflow containers. In
+> the first local run, Spark failed with `java.io.IOException: Cannot allocate memory` and
+> `dbt_warehouse` failed around the same time, so Airflow had to retry both. If you see
+> this, raise Docker's memory limit (Docker Desktop → Settings → Resources; with the WSL 2
+> backend on Windows, set `memory=` under `[wsl2]` in `%UserProfile%\.wslconfig`, then run
+> `wsl --shutdown`), or free memory with `docker compose stop metabase` while the DAG runs.
+
 ### 2b. Or run the steps yourself
 
 ```bash
@@ -297,7 +316,8 @@ use your own, add a repository secret `CI_POSTGRES_PASSWORD`
 ├── tests/              Airflow DAG integrity tests
 ├── docs/               incident report, KPI definitions, performance write-up
 ├── .env.example        every setting, no real secrets
-└── docker-compose.yml
+└── docker-compose.yml  Postgres, S3 emulator, Metabase, Airflow (API server, scheduler,
+                        DAG processor, triggerer)
 ```
 
 ## Possible next steps
